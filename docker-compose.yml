@@ -1,0 +1,62 @@
+services:
+  # Base build target
+  benchmark:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: ros2_benchmark:humble
+    networks:
+      - ros_bench
+
+  # Clock sync verification
+  clock-pub:
+    image: ros2_benchmark:humble
+    command: ros2 run benchmark_node clock_check --ros-args -p mode:=pub -p node_id:=0
+    networks:
+      - ros_bench
+
+  clock-sub:
+    image: ros2_benchmark:humble
+    command: ros2 run benchmark_node clock_check --ros-args -p mode:=sub -p node_id:=1
+    networks:
+      - ros_bench
+
+  # Publisher
+  publisher:
+    image: ros2_benchmark:humble
+    command: >
+      ros2 run benchmark_node publisher --ros-args
+      -p profile:=${PROFILE:-imu}
+      -p rate_hz:=${RATE_HZ:-100.0}
+      -p node_id:=0
+      -p num_messages:=${NUM_MESSAGES:-5000}
+      -p warmup_messages:=${WARMUP:-500}
+      -p topic:=bench_topic
+    environment:
+      - RMW_IMPLEMENTATION=${RMW:-rmw_cyclonedds_cpp}
+    networks:
+      - ros_bench
+    volumes:
+      - ./results:/ws/results
+
+  # Subscriber (scale with --scale subscriber=N)
+  subscriber:
+    image: ros2_benchmark:humble
+    command: >
+      ros2 run benchmark_node subscriber --ros-args
+      -p node_id:=${SUB_ID:-1}
+      -p mock_processing_us:=${MOCK_US:-100}
+      -p output_path:=/ws/results/
+      -p warmup_messages:=${WARMUP:-500}
+      -p expected_messages:=${NUM_MESSAGES:-5000}
+      -p topic:=bench_topic
+    environment:
+      - RMW_IMPLEMENTATION=${RMW:-rmw_cyclonedds_cpp}
+    networks:
+      - ros_bench
+    volumes:
+      - ./results:/ws/results
+
+networks:
+  ros_bench:
+    driver: bridge

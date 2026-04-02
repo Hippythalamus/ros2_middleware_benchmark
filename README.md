@@ -29,7 +29,7 @@ Number of ROS2 nodes: **2, 5, 10, 15, 20, 30, 40**
 | Metric | Method |
 |---|---|
 | **End-to-end latency** | `steady_clock` timestamp embedded by publisher, delta computed on receive |
-| **Discovery time** | Interval from node startup to first message received |
+| **Discovery time** | Measured automatically: interval from subscriber start to first message received |
 | **Throughput** | Messages per second actually delivered to subscribers |
 | **CPU usage** | Per-container, collected via `docker stats` |
 | **Memory (RSS)** | Per-container, collected via `docker stats` |
@@ -87,14 +87,15 @@ First 500 messages per run are tagged as warmup and excluded from analysis. This
 |  +----+-----+  +----+-----+       +----+-----+       |
 |       |              |                  |             |
 |       +--------------+------------------+             |
-|                Docker bridge network                  |
+|          ros_bench Docker bridge network              |
 |           RMW: CycloneDDS or Zenoh                    |
 |                                                       |
 |  +----------------------------------------------+     |
-|  | Orchestrator (Python)                         |     |
-|  |  - Launches containers                        |     |
+|  | run_experiment.py (orchestrator)              |     |
+|  |  - Creates all containers automatically       |     |
+|  |  - Starts subscribers first, then publisher   |     |
 |  |  - Collects docker stats (CPU/RAM)            |     |
-|  |  - Aggregates CSV results                     |     |
+|  |  - Waits for completion, aggregates CSV       |     |
 |  +----------------------------------------------+     |
 |                                                       |
 |  results/                                             |
@@ -117,7 +118,6 @@ First 500 messages per run are tagged as warmup and excluded from analysis. This
 ros2_middleware_benchmark/
 |-- docker/
 |   |-- Dockerfile              # ROS2 Humble + CycloneDDS + Zenoh RMW
-|   |-- docker-compose.yml      # Container orchestration
 |   +-- entrypoint.sh           # Sources ROS2 + workspace
 |-- src/                        # ROS2 package (ament_cmake)
 |   |-- CMakeLists.txt
@@ -130,9 +130,10 @@ ros2_middleware_benchmark/
 |       |-- subscriber_node.cpp # Latency measurement, mock processing, CSV output
 |       +-- clock_check.cpp     # Clock sync verification between containers
 |-- scripts/
-|   |-- run_experiment.py       # Single experiment runner
+|   |-- run_experiment.py       # Single experiment orchestrator (automated)
 |   |-- run_all.py              # Full experiment suite
 |   +-- analyze.py              # Aggregation, statistics, plot generation
+|-- docker-compose.yml          # Container definitions and network
 |-- results/                    # Raw CSV data + generated plots
 +-- README.md
 ```
@@ -147,45 +148,64 @@ ros2_middleware_benchmark/
 - Python 3.8+ (for orchestration and analysis)
 - ~10 GB disk space for Docker images
 
-### Build
+### 1. Build
 
 ```bash
-docker build -f docker/Dockerfile -t ros2_benchmark:humble --no-cache .
+docker compose build benchmark
 ```
 
-### Verify Clock Synchronization
+### 2. Verify Clock Synchronization
 
-Before running experiments, verify that `steady_clock` is consistent across containers (expected on single-host Docker with shared kernel):
+Run in two separate terminals:
+
+Terminal 1:
+```bash
+docker compose run --rm clock-sub
+```
+
+Terminal 2:
+```bash
+docker compose run --rm clock-pub
+```
+
+Expected: subscriber reports mean delta and stddev. On single-host Docker these values represent Docker bridge transport overhead (not clock skew, since all containers share the kernel clock).
+
+### 3. Run a Single Experiment (automated)
 
 ```bash
-terminal 1
-docker compose run --rm subscriber
-terminal 2 
-docker compose run --rm publisher
+# 10 subscribers, IMU profile, CycloneDDS, fan-out topology
+python3 scripts/run_experiment.py \
+  --rmw rmw_cyclonedds_cpp \
+  --profile imu \
+  --subscribers 10 \
+  --topology fanout \
+  --messages 5000
 ```
 
-Expected output: mean delta < 1000 ns, stddev < 500 ns.
+The orchestrator handles everything automatically:
+- Creates a Docker network
+- Starts all subscriber containers (each with unique node_id)
+- Waits for subscribers to initialize
+- Starts the publisher (which waits for subscriber discovery)
+- Collects docker stats in background
+- Waits for all containers to finish
+- Aggregates results into `results/` directory
 
-### Run a Single Experiment
-
-```bash
-# 10 subscribers, IMU profile, CycloneDDS
-RMW=rmw_cyclonedds_cpp SUBS=10 PROFILE=imu python3 scripts/run_experiment.py
-```
-
-### Run Full Experiment Suite
+### 4. Run Full Experiment Suite
 
 ```bash
 python3 scripts/run_all.py
 ```
 
-This iterates over all combinations of:
+Iterates over all combinations of:
 - Middleware: CycloneDDS, Zenoh
 - Node counts: 2, 5, 10, 15, 20, 30, 40
 - Profiles: twist, imu, laserscan, pointcloud
 - Topologies: fan-out, fan-in, mesh
 
-### Analyze Results
+Estimated runtime on 4-core/16GB machine: ~4-6 hours.
+
+### 5. Analyze Results
 
 ```bash
 python3 scripts/analyze.py
@@ -210,6 +230,13 @@ Each message carries a binary header:
 
 Subscriber computes `latency_ns = receive_timestamp - publish_timestamp` immediately on callback entry, before mock processing.
 
+### Discovery Synchronization
+
+Publisher calls `get_subscription_count()` on each timer tick and only begins sending once at least one subscriber is connected. This ensures:
+- No messages lost before subscriber discovery
+- Discovery time is measured accurately (subscriber records interval from its own start to first message received)
+- No dependency on manual terminal switching timing
+
 ### QoS Configuration
 
 All experiments use `RELIABLE` QoS with `KeepLast(10)` for both publisher and subscriber. This ensures no silent message drops that would skew throughput measurements.
@@ -231,7 +258,7 @@ All experiments use `RELIABLE` QoS with `KeepLast(10)` for both publisher and su
 |---|---|---|---|
 | 1 | **Single host** | No real network effects (multicast flooding, packet loss, Wi-Fi jitter) | We measure middleware software overhead and scaling, not network. Complements [Zhang et al. 2023](https://arxiv.org/abs/2309.07496) which covers network. |
 | 2 | **Resource contention** | 40 containers on 4 cores share CPU. Degradation appears earlier than on distributed hardware. | CPU load documented per experiment. Results state hardware specs explicitly. |
-| 3 | **Docker overhead** | Container networking adds latency vs native processes. | Control measurement: 2 nodes native vs Docker. Delta documented. |
+| 3 | **Docker overhead** | Container networking adds latency vs native processes. | Control measurement: 2 nodes native vs Docker. Delta documented. Baseline transport overhead measured via clock_check. |
 | 4 | **Default configs only** | DDS performance is tuning-dependent. Results may not reflect optimized setups. | Intentional: default settings represent typical developer experience. Tuned comparison planned for Publication 2. |
 | 5 | **Fixed mock computation** | Real workloads vary. | Fixed delay isolates transport overhead, which is the subject of this study. |
 

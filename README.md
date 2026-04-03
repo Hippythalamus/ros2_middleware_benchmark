@@ -1,113 +1,210 @@
-# ROS2 Middleware Scalability Benchmark
+# Out-of-the-Box ROS2 Middleware Benchmark
 
-### CycloneDDS vs Zenoh: At What Scale Does Your Middleware Break?
+### CycloneDDS vs Zenoh: How Does Your Middleware Scale?
 
-> A systematic, reproducible benchmark measuring how CycloneDDS and Zenoh behave as the number of ROS2 nodes scales from 2 to 40, using message profiles tied to real robotics workloads.
+A systematic benchmark measuring how CycloneDDS (rmw_cyclonedds_cpp) and Zenoh (rmw_zenoh_cpp v0.1.8) perform as the number of ROS2 nodes scales from 2 to 30, using message profiles tied to real robotics workloads.
+
+This benchmark focuses on **developer experience performance** rather than theoretical throughput and
+ measures **out-of-the-box performance** of ROS2 middleware implementations
+under a standard single-host deployment scenario.
+
+It is designed to answer the practical question:
+
+> "What performance should I expect if I install ROS2 and run my system without tuning?"
+
+The results reflect:
+- default configurations
+- typical developer workflows
+- no middleware-specific optimizations
+
+They do NOT represent:
+- maximum achievable performance after tuning
+- WAN / wireless / multi-host scenarios
+- optimal Zenoh deployment architectures (router-based, cloud-connected, etc.)
+
+![Scaling Results](results/plots/scaling_imu.png)
 
 ---
 
-## Motivation
+## Baseline Results
 
-ROS2 middleware performance is well-studied for two-host setups and varying network conditions ([Zhang et al. 2023](https://arxiv.org/abs/2309.07496), [Springer 2024](https://link.springer.com/article/10.1007/s10846-024-02211-2)). Discovery overhead reduction with Zenoh has been reported at 97-99% ([ZettaScale blog](https://zenoh.io/blog/2021-03-23-discovery/)).
+### Latency: Lower latency observed with CycloneDDS (default config)
 
-However, no published work systematically answers a practical engineering question:
+| Subscribers | CycloneDDS median | Zenoh median | Zenoh overhead |
+|-------------|------------------|-------------|----------------|
+| 2 | 178 us | 289 us | +62% |
+| 5 | 216 us | 369 us | +71% |
+| 10 | 280 us | 516 us | +84% |
+| 20 | 432 us | 812 us | +88% |
+| 30 | 602 us | 1026 us | +70% |
 
-**At what node count does DDS discovery overhead start degrading latency, and how does Zenoh compare at the same scale?**
+Both scale linearly with node count. CycloneDDS adds ~15 us per subscriber, Zenoh adds ~26 us.
 
-This benchmark fills that gap. All experiments use default middleware configurations (no tuning), real-world message sizes, and a fixed mock computation delay to isolate transport overhead from application logic.
+### Latency breakdown: it's all in the delivery path
 
+Publish overhead (application-side timestamp + memcpy) is ~0.1 us for both middleware and constant across all node counts. The entire latency difference is in the **delivery path** (middleware serialization + transport + deserialization + callback scheduling).
+
+### Discovery time: comparable
+
+Both middleware show similar discovery times on a Docker bridge network (6.5s at 2 nodes, 13s at 30 nodes). Zenoh's documented discovery advantages apply to WAN/Wi-Fi scenarios, not single-host Docker.
+
+### CPU usage: Zenoh consumes 2x more
+
+At 30 subscribers, CycloneDDS uses 32% total CPU vs Zenoh's 67%. This gap is consistent across all node counts.
+
+### Large messages: CycloneDDS handles 200KB payloads
+
+CycloneDDS delivers 200KB PointCloud2 messages at 3.5ms median (10 subscribers). Zenoh peer-to-peer mode did not reliably deliver messages of this size in our Docker bridge setup.
+
+---
+
+## What This Means (and What It Doesn't)
+
+These results reflect **RMW implementation maturity**, not protocol capability. CycloneDDS (rmw_cyclonedds_cpp) is a mature, optimized implementation. Zenoh (rmw_zenoh_cpp v0.1.8) is younger and still being optimized for the ROS2 use case.
+
+This benchmark intentionally does not cover scenarios where Zenoh is expected to outperform DDS, such as WAN communication, unreliable networks, or large-scale distributed systems.
+ For those use cases, see [Zhang et al. 2023](https://arxiv.org/abs/2309.07496) and [ZettaScale's benchmarks](https://zenoh.io/blog/2021-03-23-discovery/).
+
+**For engineers choosing a middleware today:** if your system runs on a single host or LAN with up to 30 nodes at default settings, CycloneDDS delivers lower latency and uses fewer resources. If you need WAN communication, fleet-scale discovery, or are planning for multi-site deployment, Zenoh's architecture may offer advantages that this benchmark was not designed to capture.
+
+---
+
+## Practical Takeaways
+
+- **If you run ROS2 on a single machine or LAN with default settings:**
+  CycloneDDS provides lower latency and better CPU efficiency.
+
+- **If you need WAN communication, NAT traversal, or fleet-scale systems:**
+  Zenoh offers architectural advantages not covered in this benchmark.
+
+- **If you plan to tune your middleware:**
+  These results are a baseline, not a limit. Both systems can behave differently under optimized configurations.
+  
 ---
 
 ## Experiment Design
 
-### Independent Variable
+### Configuration
 
-Number of ROS2 nodes: **2, 5, 10, 15, 20, 30, 40**
+| Parameter | Value |
+|-----------|-------|
+| ROS2 distro | Humble |
+| CycloneDDS | rmw_cyclonedds_cpp (default config) |
+| Zenoh | rmw_zenoh_cpp v0.1.8 (peer-to-peer, multicast scouting) |
+| Topology | Fan-out: 1 publisher, N subscribers |
+| Message rate | 100 Hz (IMU), 10 Hz (PointCloud2) |
+| Messages per run | 5000 (+ 500 warmup) |
+| Mock processing | 100 us fixed sleep per message |
+| QoS | RELIABLE, KeepLast(10) |
+| Infrastructure | Docker containers on bridge network |
+| Hardware | Ubuntu Linux, 4 cores, 16 GB RAM |
 
 ### Measured Metrics
 
 | Metric | Method |
-|---|---|
-| **End-to-end latency** | `steady_clock` timestamp embedded by publisher, delta computed on receive |
-| **Discovery time** | Measured automatically: interval from subscriber start to first message received |
-| **Throughput** | Messages per second actually delivered to subscribers |
-| **CPU usage** | Per-container, collected via `docker stats` |
-| **Memory (RSS)** | Per-container, collected via `docker stats` |
-| **Jitter** | Standard deviation of latency across all non-warmup messages |
+|--------|--------|
+| **End-to-end latency** | `steady_clock` timestamp embedded by publisher, delta on receive |
+| **Publish overhead** | Time between timestamp capture and pre-publish (t2 - t1) |
+| **Delivery latency** | Time from pre-publish to subscriber callback (t3 - t2) |
+| **Discovery time** | Interval from subscriber start to first message received |
+| **CPU / Memory** | Per-container via `docker stats` |
 
 ### Message Profiles
 
-Message sizes are tied to real ROS2 robotics workloads, not arbitrary byte counts:
+| Profile | Size | Real-World Equivalent | Frequency |
+|---------|------|-----------------------|-----------|
+| `imu` | 300 B | `sensor_msgs/Imu` | 100 Hz |
+| `pointcloud` | 200 KB | `sensor_msgs/PointCloud2` | 10 Hz |
 
-| Profile | Approx. Size | Real-World Equivalent | Default Frequency |
-|---|---|---|---|
-| `twist` | 48 B | `geometry_msgs/Twist` velocity commands | 50 Hz |
-| `imu` | 300 B | `sensor_msgs/Imu` inertial measurement unit | 100 Hz |
-| `laserscan` | 10 KB | `sensor_msgs/LaserScan` 2D lidar scan | 20 Hz |
-| `pointcloud` | 200 KB | `sensor_msgs/PointCloud2` 3D lidar chunk | 10 Hz |
+### Timestamp Mechanism
 
-### Communication Topologies
+Each message carries a 24-byte header:
 
-| Topology | Description | Real-World Scenario |
-|---|---|---|
-| **Fan-out** | 1 publisher, N subscribers | Sensor broadcast to multiple consumers |
-| **Fan-in** | N publishers, 1 subscriber | Sensor fusion from multiple sources |
-| **Mesh** | N-to-N | Multi-agent coordination |
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 8 B | t1: timestamp before payload preparation |
+| 8 | 8 B | t2: timestamp just before `publish()` call |
+| 16 | 4 B | sequence number |
+| 20 | 4 B | publisher node ID |
 
-### Middleware Under Test
-
-| Middleware | RMW Implementation | Configuration |
-|---|---|---|
-| **CycloneDDS** | `rmw_cyclonedds_cpp` | Default (no tuning) |
-| **Zenoh** | `rmw_zenoh_cpp` | Default (no tuning) |
-
-Same application code for both. Only the `RMW_IMPLEMENTATION` environment variable changes between runs.
-
-### Mock Computation
-
-Each subscriber applies a fixed `sleep` (default: 100 us) after receiving a message to simulate processing time. This value is identical for both middleware, isolating transport overhead from application logic.
-
-### Warmup
-
-First 500 messages per run are tagged as warmup and excluded from analysis. This ensures DDS discovery settling and cache warming do not skew results.
+Subscriber records t3 (receive time) immediately on callback entry, before mock processing.
 
 ---
 
-## Architecture
+## Full Results
 
+### CycloneDDS Scaling (IMU, 300 bytes, 100 Hz)
+
+| Nodes | Median (us) | P95 (us) | P99 (us) | Discovery (ms) | CPU (%) | RAM (MiB) |
+|-------|-------------|----------|----------|-----------------|---------|-----------|
+| 2 | 178 | 409 | - | 6583 | 2.6 | 39 |
+| 5 | 216 | 530 | - | 7410 | 6.7 | 97 |
+| 10 | 280 | 730 | - | 8492 | 12.5 | 199 |
+| 20 | 432 | 1167 | - | 10200 | 27.2 | 415 |
+| 30 | 602 | 1184 | - | 12956 | 32.3 | 650 |
+
+### Zenoh Scaling (IMU, 300 bytes, 100 Hz)
+
+| Nodes | Median (us) | P95 (us) | P99 (us) | Discovery (ms) | CPU (%) | RAM (MiB) |
+|-------|-------------|----------|----------|-----------------|---------|-----------|
+| 2 | 289 | 727 | - | 6450 | 62.4 | 501 |
+| 5 | 369 | 871 | - | 7352 | 9.8 | 104 |
+| 10 | 516 | 1209 | - | 8355 | 19.2 | 220 |
+| 20 | 812 | 1824 | - | 10211 | 38.1 | 480 |
+| 30 | 1026 | 2579 | - | 12284 | 66.7 | 789 |
+
+### CycloneDDS PointCloud2 (200 KB, 10 Hz, 10 subscribers)
+
+| Median (us) | P95 (us) | Discovery (ms) | CPU (%) |
+|-------------|----------|-----------------|---------|
+| 3542 | 11241 | 5609 | 8.5 |
+
+---
+
+## Known Limitations
+
+| # | Limitation | Impact | Mitigation |
+|---|-----------|--------|------------|
+| 1 | **Single host** | No real network effects | Measures middleware overhead, not network. Complements network-focused studies. |
+| 2 | **Resource contention** | 30 containers on 4 cores | CPU load documented. Degradation threshold will be higher on multi-machine setups. |
+| 3 | **Docker bridge** | Adds transport overhead | Same overhead for both middleware. Baseline measured via clock_check. |
+| 4 | **Default configs** | DDS is tuning-dependent | Intentional: represents typical developer experience. Tuned comparison planned. |
+| 5 | **rmw_zenoh_cpp maturity** | v0.1.8 is early | Results may improve significantly in future versions. |
+| 6 | **Zenoh large messages** | PointCloud2 not delivered in peer-to-peer mode | Needs further investigation. May require router mode or transport tuning. |
+
+---
+
+## Reproducing Results
+
+### Prerequisites
+
+- Docker and Docker Compose
+- Python 3.8+ with matplotlib (`pip3 install matplotlib`)
+
+### Build and Run
+
+```bash
+# Build
+docker compose build benchmark
+
+# Quick suite: IMU profile, both middleware, 2-30 nodes
+python3 scripts/run_all.py --quick
+
+# Full suite
+python3 scripts/run_all.py
+
+# Analyze and generate plots
+python3 scripts/analyze.py
 ```
-+-----------------------------------------------------+
-|                    Host Machine                      |
-|                Ubuntu, 4 cores, 16 GB                |
-|                                                      |
-|  +----------+  +----------+       +----------+       |
-|  |Publisher  |  |Subscriber|  ...  |Subscriber|       |
-|  |Container |  |Container |       |Container |       |
-|  |  node_0  |  |  node_1  |       |  node_N  |       |
-|  +----+-----+  +----+-----+       +----+-----+       |
-|       |              |                  |             |
-|       +--------------+------------------+             |
-|          ros_bench Docker bridge network              |
-|           RMW: CycloneDDS or Zenoh                    |
-|                                                       |
-|  +----------------------------------------------+     |
-|  | run_experiment.py (orchestrator)              |     |
-|  |  - Creates all containers automatically       |     |
-|  |  - Starts subscribers first, then publisher   |     |
-|  |  - Collects docker stats (CPU/RAM)            |     |
-|  |  - Waits for completion, aggregates CSV       |     |
-|  +----------------------------------------------+     |
-|                                                       |
-|  results/                                             |
-|  +-- cyclonedds/                                      |
-|  |   +-- fanout_imu_10nodes/                          |
-|  |   |   +-- sub_1.csv                                |
-|  |   |   +-- sub_2.csv                                |
-|  |   |   +-- docker_stats.csv                         |
-|  |   +-- ...                                          |
-|  +-- zenoh/                                           |
-|      +-- ...                                          |
-+-------------------------------------------------------+
+
+### Single Experiment
+
+```bash
+python3 scripts/run_experiment.py \
+  --rmw rmw_cyclonedds_cpp \
+  --profile imu \
+  --subscribers 10 \
+  --messages 5000
 ```
 
 ---
@@ -117,168 +214,46 @@ First 500 messages per run are tagged as warmup and excluded from analysis. This
 ```
 ros2_middleware_benchmark/
 |-- docker/
-|   |-- Dockerfile              # ROS2 Humble + CycloneDDS + Zenoh RMW
-|   +-- entrypoint.sh           # Sources ROS2 + workspace
-|-- src/                        # ROS2 package (ament_cmake)
+|   |-- Dockerfile
+|   |-- entrypoint.sh
+|   |-- zenoh_peer_config.json5
+|   +-- zenoh_router_config.json5
+|-- src/
 |   |-- CMakeLists.txt
 |   |-- package.xml
-|   |-- include/
-|   |   +-- benchmark_node/
-|   |       +-- config.hpp      # Message profiles, experiment config, metric types
+|   |-- include/benchmark_node/config.hpp
 |   +-- src/
-|       |-- publisher_node.cpp  # Configurable publisher with embedded timestamps
-|       |-- subscriber_node.cpp # Latency measurement, mock processing, CSV output
-|       +-- clock_check.cpp     # Clock sync verification between containers
+|       |-- publisher_node.cpp
+|       |-- subscriber_node.cpp
+|       +-- clock_check.cpp
 |-- scripts/
-|   |-- run_experiment.py       # Single experiment orchestrator (automated)
-|   |-- run_all.py              # Full experiment suite
-|   +-- analyze.py              # Aggregation, statistics, plot generation
-|-- docker-compose.yml          # Container definitions and network
-|-- results/                    # Raw CSV data + generated plots
+|   |-- run_experiment.py
+|   |-- run_all.py
+|   +-- analyze.py
+|-- results/
+|   |-- summary.csv
+|   +-- plots/
+|-- docker-compose.yml
 +-- README.md
 ```
 
 ---
 
-## Quick Start
-
-### Prerequisites
-
-- Docker and Docker Compose
-- Python 3.8+ (for orchestration and analysis)
-- ~10 GB disk space for Docker images
-
-### 1. Build
-
-```bash
-docker compose build benchmark
-```
-
-### 2. Verify Clock Synchronization
-
-Run in two separate terminals:
-
-Terminal 1:
-```bash
-docker compose run --rm clock-sub
-```
-
-Terminal 2:
-```bash
-docker compose run --rm clock-pub
-```
-
-Expected: subscriber reports mean delta and stddev. On single-host Docker these values represent Docker bridge transport overhead (not clock skew, since all containers share the kernel clock).
-
-### 3. Run a Single Experiment (automated)
-
-```bash
-# 10 subscribers, IMU profile, CycloneDDS, fan-out topology
-python3 scripts/run_experiment.py \
-  --rmw rmw_cyclonedds_cpp \
-  --profile imu \
-  --subscribers 10 \
-  --topology fanout \
-  --messages 5000
-```
-
-The orchestrator handles everything automatically:
-- Creates a Docker network
-- Starts all subscriber containers (each with unique node_id)
-- Waits for subscribers to initialize
-- Starts the publisher (which waits for subscriber discovery)
-- Collects docker stats in background
-- Waits for all containers to finish
-- Aggregates results into `results/` directory
-
-### 4. Run Full Experiment Suite
-
-```bash
-python3 scripts/run_all.py
-```
-
-Iterates over all combinations of:
-- Middleware: CycloneDDS, Zenoh
-- Node counts: 2, 5, 10, 15, 20, 30, 40
-- Profiles: twist, imu, laserscan, pointcloud
-- Topologies: fan-out, fan-in, mesh
-
-Estimated runtime on 4-core/16GB machine: ~4-6 hours.
-
-### 5. Analyze Results
-
-```bash
-python3 scripts/analyze.py
-```
-
-Generates plots and summary statistics in `results/`.
-
----
-
-## Implementation Details
-
-### Timestamp Mechanism
-
-Each message carries a binary header:
-
-| Offset | Size | Field | Description |
-|---|---|---|---|
-| 0 | 8 bytes | `timestamp_ns` | Publisher's `steady_clock` reading (nanoseconds) |
-| 8 | 4 bytes | `seq` | Sequence number |
-| 12 | 4 bytes | `node_id` | Publisher identity |
-| 16+ | variable | padding | Zero-filled to match profile size |
-
-Subscriber computes `latency_ns = receive_timestamp - publish_timestamp` immediately on callback entry, before mock processing.
-
-### Discovery Synchronization
-
-Publisher calls `get_subscription_count()` on each timer tick and only begins sending once at least one subscriber is connected. This ensures:
-- No messages lost before subscriber discovery
-- Discovery time is measured accurately (subscriber records interval from its own start to first message received)
-- No dependency on manual terminal switching timing
-
-### QoS Configuration
-
-All experiments use `RELIABLE` QoS with `KeepLast(10)` for both publisher and subscriber. This ensures no silent message drops that would skew throughput measurements.
-
-### C++17 Features Used
-
-- `std::string_view` for zero-copy profile name handling
-- `std::variant` for topology configuration
-- `constexpr` compile-time profile table
-- `[[nodiscard]]` for API safety
-- Structured bindings where applicable
-- `std::optional` for nullable parameters
-
----
-
-## Known Limitations
-
-| # | Limitation | Impact | Mitigation |
-|---|---|---|---|
-| 1 | **Single host** | No real network effects (multicast flooding, packet loss, Wi-Fi jitter) | We measure middleware software overhead and scaling, not network. Complements [Zhang et al. 2023](https://arxiv.org/abs/2309.07496) which covers network. |
-| 2 | **Resource contention** | 40 containers on 4 cores share CPU. Degradation appears earlier than on distributed hardware. | CPU load documented per experiment. Results state hardware specs explicitly. |
-| 3 | **Docker overhead** | Container networking adds latency vs native processes. | Control measurement: 2 nodes native vs Docker. Delta documented. Baseline transport overhead measured via clock_check. |
-| 4 | **Default configs only** | DDS performance is tuning-dependent. Results may not reflect optimized setups. | Intentional: default settings represent typical developer experience. Tuned comparison planned for Publication 2. |
-| 5 | **Fixed mock computation** | Real workloads vary. | Fixed delay isolates transport overhead, which is the subject of this study. |
-
----
-
 ## Planned Work
 
-- [ ] **Publication 1** (current): Default middleware configurations, full scaling analysis
-- [ ] **Publication 2**: Tuned CycloneDDS configuration, showing how optimization shifts the degradation threshold
-- [ ] Multi-host experiments (2+ machines) to validate single-host findings
-- [ ] Integration with `ros2_tracing` for deeper profiling
+- [ ] Tuned DDS configuration (Publication 2)
+- [ ] Zenoh UDP transport vs TCP
+- [ ] Fan-in topology (N publishers, 1 subscriber)
+- [ ] Multi-host experiments
+- [ ] `ros2_tracing` integration for kernel-level breakdown
 
 ---
 
 ## Related Work
 
-- Zhang, J. et al. (2023). *Comparison of Middlewares in Edge-to-Edge and Edge-to-Cloud Communication for Distributed ROS2 Systems.* [arXiv:2309.07496](https://arxiv.org/abs/2309.07496)
-- ZettaScale (2021). *Minimizing Discovery Overhead in ROS2.* [zenoh.io/blog](https://zenoh.io/blog/2021-03-23-discovery/)
-- Springer (2024). *Performance Comparison of ROS2 Middlewares for Multi-robot Mesh Networks in Planetary Exploration.* [DOI](https://link.springer.com/article/10.1007/s10846-024-02211-2)
-- Open Robotics (2021). *ROS Middleware Evaluation Report.* [TSC-RMW-Reports](https://osrf.github.io/TSC-RMW-Reports/humble/)
+- Zhang, J. et al. (2023). [Comparison of Middlewares in Edge-to-Edge and Edge-to-Cloud Communication for Distributed ROS2 Systems.](https://arxiv.org/abs/2309.07496)
+- ZettaScale (2021). [Minimizing Discovery Overhead in ROS2.](https://zenoh.io/blog/2021-03-23-discovery/)
+- Springer (2024). [Performance Comparison of ROS2 Middlewares for Multi-robot Mesh Networks in Planetary Exploration.](https://link.springer.com/article/10.1007/s10846-024-02211-2)
 
 ---
 
@@ -288,12 +263,7 @@ MIT
 
 ## Author
 
-**Evgeniia Slepynina** -- Senior C++ / Robotics Engineer  
-Specializing in real-time systems, autonomous robot control, and system architecture.
+**Evgeniia Slepynina** -- Senior C++ / Robotics Engineer
 
 - [LinkedIn](https://www.linkedin.com/in/evgeniia-slepynina-a3802a249)
 - slepynina.eu@gmail.com
-
----
-
-*If you find this benchmark useful, consider giving it a star and sharing with the ROS2 community.*

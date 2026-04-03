@@ -73,9 +73,17 @@ struct ExperimentConfig {
 // ---------------------------------------------------------------
 struct LatencyRecord {
     std::uint64_t seq;                    // message sequence number
-    std::int64_t  publish_timestamp_ns;   // publisher's steady_clock
-    std::int64_t  receive_timestamp_ns;   // subscriber's steady_clock
-    std::int64_t  latency_ns;            // receive - publish
+
+    // --- Raw timestamps ---
+    std::int64_t  t1_ns;                  // before publish (publisher)
+    std::int64_t  t2_ns;                  // before publish call (publisher)
+    std::int64_t  receive_timestamp_ns;   // subscriber receive time (t3)
+
+    // --- Derived metrics ---
+    std::int64_t  publish_overhead_ns;    // t2 - t1
+    std::int64_t  delivery_ns;            // t3 - t2
+    std::int64_t  latency_ns;             // t3 - t1
+
     std::uint32_t publisher_id;
     std::uint32_t subscriber_id;
 };

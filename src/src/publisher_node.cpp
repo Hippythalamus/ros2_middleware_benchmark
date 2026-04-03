@@ -59,8 +59,8 @@ public:
         publisher_ = create_publisher<std_msgs::msg::ByteMultiArray>(topic, qos);
 
         // --- Prepare payload template ---
-        // Layout: [8 bytes timestamp_ns] [4 bytes seq] [4 bytes node_id] [padding...]
-        constexpr std::size_t kHeaderSize = 16; // 8 + 4 + 4
+        // Layout: [8 bytes t1_ns] [8 bytes t2_ns] [4 bytes seq] [4 bytes node_id] [padding...]
+        constexpr std::size_t kHeaderSize = 24; // 8 + 8 + 4 + 4
         const auto total = std::max(payload_size_, kHeaderSize);
         payload_template_.resize(total, 0);
 
@@ -99,14 +99,23 @@ private:
         auto msg = std_msgs::msg::ByteMultiArray();
         msg.data = payload_template_;
 
-        // Stamp current time (nanoseconds since epoch of steady_clock)
-        const auto ts = now_ns();
+        // t1: before any work
+        const auto t1 = now_ns();
 
-        // Embed header: [timestamp_ns(8)][seq(4)][node_id(4)]
-        std::memcpy(msg.data.data(),     &ts,       sizeof(ts));
-        std::memcpy(msg.data.data() + 8, &seq_,     sizeof(seq_));
-        std::memcpy(msg.data.data() + 12, &node_id_, sizeof(node_id_));
+        // t2: right before publish (application overhead included)
+        const auto t2 = now_ns();
 
+        // Embed header:
+        // [t1(8)][t2(8)][seq(4)][node_id(4)]
+        // NOTE:
+        // t2 is captured BEFORE publish() to avoid ambiguity with async middleware.
+        // Therefore:
+        // - (t2 - t1) = application-level overhead
+        // - (t3 - t2) = middleware + transport + receive overhead
+        std::memcpy(msg.data.data(),      &t1,      sizeof(t1));
+        std::memcpy(msg.data.data() + 8,  &t2,      sizeof(t2));
+        std::memcpy(msg.data.data() + 16, &seq_,    sizeof(seq_));
+        std::memcpy(msg.data.data() + 20, &node_id_, sizeof(node_id_));
         publisher_->publish(msg);
         ++seq_;
     }

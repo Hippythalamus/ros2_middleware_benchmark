@@ -1,0 +1,42 @@
+{
+  mode: "peer",
+  connect: {
+    endpoints: [],
+  },
+  listen: {
+    endpoints: [
+      "udp/0.0.0.0:0"
+    ],
+  },
+  scouting: {
+    timeout: 3000,
+    delay: 500,
+    multicast: {
+      enabled: true,
+      address: "224.0.0.224:7446",
+      interface: "auto",
+      autoconnect: { router: [], peer: ["peer"] },
+      listen: true,
+    },
+    gossip: {
+      enabled: true,
+      multihop: false,
+      autoconnect: { router: [], peer: ["peer"] },
+    },
+  },
+  timestamping: {
+    enabled: { router: true, peer: true, client: true },
+  },
+  transport: {
+    unicast: {
+      open_timeout: 60000,
+      accept_timeout: 60000,
+      accept_pending: 10000,
+      max_sessions: 10000,
+      qos: { enabled: true },
+    },
+    shared_memory: {
+      enabled: false,
+    },
+  },
+}

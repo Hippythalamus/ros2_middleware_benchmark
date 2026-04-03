@@ -8,6 +8,14 @@ services:
     networks:
       - ros_bench
 
+  # Zenoh router (required for rmw_zenoh_cpp)
+  zenoh-router:
+    image: ros2_benchmark:humble
+    command: ros2 run rmw_zenoh_cpp rmw_zenohd
+    networks:
+      - ros_bench
+    container_name: bench_zenoh_router
+
   # Clock sync verification
   clock-pub:
     image: ros2_benchmark:humble
@@ -39,7 +47,7 @@ services:
     volumes:
       - ./results:/ws/results
 
-  # Subscriber (scale with --scale subscriber=N)
+  # Subscriber
   subscriber:
     image: ros2_benchmark:humble
     command: >

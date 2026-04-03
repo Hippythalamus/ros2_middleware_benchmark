@@ -1,0 +1,67 @@
+{
+  mode: "peer",
+  connect: {
+    timeout_ms: { router: -1, peer: -1, client: 0 },
+    endpoints: [
+      "tcp/bench_zenoh_router:7447"
+    ],
+    exit_on_failure: { router: false, peer: false, client: true },
+    retry: {
+      period_init_ms: 1000,
+      period_max_ms: 4000,
+      period_increase_factor: 2,
+    },
+  },
+  listen: {
+    timeout_ms: 0,
+    endpoints: [
+      "tcp/0.0.0.0:0"
+    ],
+    exit_on_failure: true,
+    retry: {
+      period_init_ms: 1000,
+      period_max_ms: 4000,
+      period_increase_factor: 2,
+    },
+  },
+  scouting: {
+    timeout: 3000,
+    delay: 500,
+    multicast: {
+      enabled: false,
+    },
+    gossip: {
+      enabled: true,
+      multihop: false,
+      target: { router: ["router", "peer"], peer: ["router"]},
+      autoconnect: { router: [], peer: ["router", "peer"] },
+    },
+  },
+  timestamping: {
+    enabled: { router: true, peer: true, client: true },
+    drop_future_timestamp: false,
+  },
+  queries_default_timeout: 600000,
+  transport: {
+    unicast: {
+      open_timeout: 60000,
+      accept_timeout: 60000,
+      accept_pending: 10000,
+      max_sessions: 10000,
+      max_links: 1,
+      lowlatency: false,
+      qos: { enabled: true },
+      compression: { enabled: false },
+    },
+    link: {
+      tx: {
+        lease: 60000,
+        keep_alive: 2,
+        batch_size: 65535,
+      },
+    },
+    shared_memory: {
+      enabled: false,
+    },
+  },
+}

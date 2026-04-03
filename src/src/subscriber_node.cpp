@@ -75,32 +75,47 @@ private:
                 "Subscriber [id=%u] first message received, discovery_time=%.3f ms",
                 node_id_, static_cast<double>(discovery_time_ns_) / 1e6);
         }
-
-        // Decode header: [timestamp_ns(8)][seq(4)][publisher_id(4)]
-        if (msg->data.size() < 16) {
+        // Decode header: [t1_ns(8)][t2_ns(8)][seq(4)][publisher_id(4)]
+        if (msg->data.size() < 24) {
             RCLCPP_WARN(get_logger(), "Message too small, skipping");
             return;
         }
 
-        std::int64_t publish_ts = 0;
+        // NOTE:
+        // t2 is captured BEFORE publish() on the publisher side.
+        // Therefore:
+        // - publish_overhead_ns = application-level cost (no transport)
+        // - delivery_ns includes middleware + transport + receive + scheduling
+        std::int64_t t1 = 0;
+        std::int64_t t2 = 0;
         std::uint64_t seq = 0;
         std::uint32_t pub_id = 0;
 
-        std::memcpy(&publish_ts, msg->data.data(),      sizeof(publish_ts));
-        std::memcpy(&seq,        msg->data.data() + 8,  sizeof(seq));
-        std::memcpy(&pub_id,     msg->data.data() + 12, sizeof(pub_id));
-
+        // [t1(8)][t2(8)][seq(4)][pub_id(4)]
+        std::memcpy(&t1,     msg->data.data(),      sizeof(t1));
+        std::memcpy(&t2,     msg->data.data() + 8,  sizeof(t2));
+        std::memcpy(&seq,    msg->data.data() + 16, sizeof(seq));
+        std::memcpy(&pub_id, msg->data.data() + 20, sizeof(pub_id));
         // Mock computation: fixed sleep to simulate processing
         if (mock_delay_us_ > 0) {
             std::this_thread::sleep_for(std::chrono::microseconds(mock_delay_us_));
         }
 
-        // Record (including warmup, we'll filter later)
+        const auto publish_overhead_ns = t2 - t1;
+        const auto end_to_end_ns       = receive_ts - t1;
+        const auto delivery_ns        = receive_ts - t2;
+
         records_.push_back(LatencyRecord{
             .seq = seq,
-            .publish_timestamp_ns = publish_ts,
+
+            .t1_ns = t1,
+            .t2_ns = t2,
             .receive_timestamp_ns = receive_ts,
-            .latency_ns = receive_ts - publish_ts,
+
+            .publish_overhead_ns = publish_overhead_ns,
+            .delivery_ns = delivery_ns,
+            .latency_ns = end_to_end_ns,
+
             .publisher_id = pub_id,
             .subscriber_id = node_id_
         });
@@ -132,7 +147,8 @@ private:
 
         // Header
         ofs << "seq,publisher_id,subscriber_id,"
-            << "publish_ts_ns,receive_ts_ns,latency_ns,"
+            << "t1_ns,t2_ns,receive_ts_ns,"
+            << "publish_overhead_ns,delivery_ns,latency_ns,"
             << "is_warmup,discovery_time_ns\n";
 
         for (std::size_t i = 0; i < records_.size(); ++i) {
@@ -141,8 +157,11 @@ private:
             ofs << r.seq << ','
                 << r.publisher_id << ','
                 << r.subscriber_id << ','
-                << r.publish_timestamp_ns << ','
+                << r.t1_ns << ','
+                << r.t2_ns << ','
                 << r.receive_timestamp_ns << ','
+                << r.publish_overhead_ns << ','
+                << r.delivery_ns << ','
                 << r.latency_ns << ','
                 << (is_warmup ? 1 : 0) << ','
                 << discovery_time_ns_ << '\n';

@@ -5,6 +5,8 @@ Automated experiment orchestrator for ROS2 middleware benchmark.
 Launches N subscriber containers, waits for them to initialize,
 then launches the publisher. Waits for ALL containers to finish naturally.
 
+For Zenoh: automatically starts a zenoh router before subscribers.
+
 Usage:
     python3 scripts/run_experiment.py \
         --rmw rmw_cyclonedds_cpp \
@@ -24,11 +26,14 @@ from pathlib import Path
 
 DOCKER_IMAGE = "ros2_benchmark:humble"
 NETWORK_NAME = "ros_bench"
+ZENOH_ROUTER_NAME = "bench_zenoh_router"
 
 # How long to wait for subscriber containers to initialize (seconds)
-SUBSCRIBER_INIT_WAIT = 3
+SUBSCRIBER_INIT_WAIT = 5
 # How long between launching each subscriber (seconds)
 SUBSCRIBER_STAGGER = 0.5
+# How long to wait for zenoh router to start (seconds)
+ZENOH_ROUTER_WAIT = 5
 # Max time to wait for all containers to finish (seconds)
 MAX_EXPERIMENT_TIME = 600  # 10 minutes
 
@@ -53,7 +58,8 @@ def cleanup_containers(prefix="bench_"):
     for name in result.stdout.strip().split("\n"):
         if name and name.startswith(prefix):
             print(f"[orch] Removing leftover container: {name}")
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+            subprocess.run(["docker", "rm", "-f", name],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def wait_for_container(name, proc, results_dict):
@@ -72,6 +78,52 @@ def wait_for_container(name, proc, results_dict):
         }
 
 
+def is_zenoh(rmw):
+    """Check if RMW is Zenoh."""
+    return "zenoh" in rmw
+
+
+def start_zenoh_router():
+    """Start the Zenoh router daemon and wait for it to be ready."""
+    print(f"[orch] Starting Zenoh router...")
+
+    cmd = [
+	    "docker", "run", "--rm", "-d",
+	    "--network", NETWORK_NAME,
+	    "--name", ZENOH_ROUTER_NAME,
+	    "-v", f"{os.path.abspath('docker/zenoh_router_config.json5')}:/zenoh_config.json5",
+	    DOCKER_IMAGE,
+	    "ros2", "run", "rmw_zenoh_cpp", "rmw_zenohd",
+	    "--config", "/zenoh_config.json5",
+        "--cpuset-cpus", "0-3",
+	]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[orch] ERROR starting Zenoh router: {result.stderr}")
+        return False
+
+    print(f"[orch] Zenoh router started, waiting {ZENOH_ROUTER_WAIT}s for initialization...")
+    time.sleep(ZENOH_ROUTER_WAIT)
+
+    # Verify it's running
+    check = subprocess.run(
+        ["docker", "ps", "--filter", f"name={ZENOH_ROUTER_NAME}", "--format", "{{.Status}}"],
+        capture_output=True, text=True
+    )
+    if "Up" in check.stdout:
+        print(f"[orch] Zenoh router is running")
+        return True
+    else:
+        print(f"[orch] ERROR: Zenoh router is not running")
+        return False
+
+
+def stop_zenoh_router():
+    """Stop the Zenoh router."""
+    subprocess.run(["docker", "rm", "-f", ZENOH_ROUTER_NAME],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def run_experiment(args):
     rmw = args.rmw
     profile = args.profile
@@ -81,6 +133,7 @@ def run_experiment(args):
     mock_us = args.mock_us
     rate_hz = args.rate_hz
     topology = args.topology
+    use_zenoh = is_zenoh(rmw)
 
     # Result directory
     rmw_short = "cyclonedds" if "cyclone" in rmw else "zenoh"
@@ -94,7 +147,7 @@ def run_experiment(args):
 
     print(f"\n{'='*60}")
     print(f"  EXPERIMENT: {experiment_name}")
-    print(f"  RMW:        {rmw}")
+    print(f"  RMW:        {rmw} ")
     print(f"  Profile:    {profile}")
     print(f"  Subscribers: {num_subs}")
     print(f"  Messages:   {num_messages} (+{warmup} warmup)")
@@ -111,6 +164,12 @@ def run_experiment(args):
     container_results = {}
 
     try:
+        # --- Start Zenoh router if needed ---
+        #if use_zenoh:
+        #    if not start_zenoh_router():
+        #        print("[orch] FAILED to start Zenoh router, aborting")
+        #        return False
+
         # --- Launch subscribers ---
         print(f"[orch] Launching {num_subs} subscriber(s)...")
         for i in range(num_subs):
@@ -119,25 +178,31 @@ def run_experiment(args):
             container_names.append(name)
 
             cmd = [
-                "docker", "run", "--rm",
-                "--network", NETWORK_NAME,
-                "--name", name,
-                "-e", f"RMW_IMPLEMENTATION={rmw}",
-                "-v", f"{os.path.abspath(result_dir)}:/ws/results",
-                DOCKER_IMAGE,
-                "ros2", "run", "benchmark_node", "subscriber",
-                "--ros-args",
-                "-p", f"node_id:={sub_id}",
-                "-p", f"mock_processing_us:={mock_us}",
-                "-p", "output_path:=/ws/results/",
-                "-p", f"warmup_messages:={warmup}",
-                "-p", f"expected_messages:={num_messages}",
-                "-p", "topic:=bench_topic",
-            ]
+		    "docker", "run", "--rm",
+		    "--network", NETWORK_NAME,
+		    "--name", name,
+		    "-e", f"RMW_IMPLEMENTATION={rmw}",
+		    ]
+            if use_zenoh:
+                cmd += [
+                "-e", "ZENOH_SESSION_CONFIG_URI=/zenoh_config.json5",
+                "-v", f"{os.path.abspath('docker/zenoh_peer_config.json5')}:/zenoh_config.json5",
+                ]
+            cmd += [
+                    "-v", f"{os.path.abspath(result_dir)}:/ws/results",
+                    DOCKER_IMAGE,
+                    "ros2", "run", "benchmark_node", "subscriber",
+                    "--ros-args",
+                    "-p", f"node_id:={sub_id}",
+                    "-p", f"mock_processing_us:={mock_us}",
+                    "-p", "output_path:=/ws/results/",
+                    "-p", f"warmup_messages:={warmup}",
+                    "-p", f"expected_messages:={num_messages}",
+                    "-p", "topic:=bench_topic",
+                ]
 
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
-            # Thread to wait for this container
             t = threading.Thread(target=wait_for_container, args=(name, proc, container_results))
             t.start()
             wait_threads.append(t)
@@ -151,17 +216,29 @@ def run_experiment(args):
 
         # --- Start docker stats collection ---
         stats_file = result_dir / "docker_stats.csv"
-        stats_proc = start_stats_collection(container_names, stats_file)
+        all_containers = container_names.copy()
+        if use_zenoh:
+            all_containers.append(ZENOH_ROUTER_NAME)
+        stats_proc = start_stats_collection(all_containers, stats_file)
 
+        time.sleep(1)
         # --- Launch publisher ---
         pub_name = "bench_pub_0"
         container_names.append(pub_name)
-
+        
         pub_cmd = [
-            "docker", "run", "--rm",
-            "--network", NETWORK_NAME,
-            "--name", pub_name,
-            "-e", f"RMW_IMPLEMENTATION={rmw}",
+	    "docker", "run", "--rm",
+	    "--network", NETWORK_NAME,
+	    "--name", pub_name,
+	    "-e", f"RMW_IMPLEMENTATION={rmw}",
+        ]
+        if use_zenoh:
+            pub_cmd += [
+            "-e", "ZENOH_SESSION_CONFIG_URI=/zenoh_config.json5",
+            "-v", f"{os.path.abspath('docker/zenoh_peer_config.json5')}:/zenoh_config.json5",
+            ]
+        pub_cmd += [
+
             "-v", f"{os.path.abspath(result_dir)}:/ws/results",
             DOCKER_IMAGE,
             "ros2", "run", "benchmark_node", "publisher",
@@ -205,7 +282,6 @@ def run_experiment(args):
         for name in sorted(container_results.keys()):
             info = container_results[name]
             output_lines = info['output'].strip().split('\n')
-            # Show last few lines of output
             relevant = [l for l in output_lines if '[INFO]' in l or '[WARN]' in l or '[ERROR]' in l]
             if relevant:
                 print(f"\n  {name}:")
@@ -213,11 +289,13 @@ def run_experiment(args):
                     print(f"    {line}")
 
     finally:
-        # Force cleanup only for containers that didn't exit
+        # Cleanup
         print(f"\n[orch] Final cleanup...")
         for name in container_names:
             subprocess.run(["docker", "rm", "-f", name],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if use_zenoh:
+            stop_zenoh_router()
 
     # --- Check results ---
     csv_files = sorted(result_dir.glob("sub_*.csv"))
@@ -252,7 +330,7 @@ def start_stats_collection(container_names, output_file):
         while IFS= read -r line; do
             echo "$(date +%s),$line" >> {output_file}
         done
-        sleep 2
+        sleep 0.5
     done
     """
     proc = subprocess.Popen(

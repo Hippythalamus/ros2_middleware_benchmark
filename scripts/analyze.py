@@ -367,6 +367,10 @@ def generate_plots(experiments, output_dir):
             'twist': '#FF9800', 'imu': '#2196F3',
             'laserscan': '#9C27B0', 'pointcloud': '#F44336',
         }
+        colors = {'cyclonedds': '#2196F3', 'zenoh': '#4CAF50',
+                'zenoh_peer': '#4CAF50', 'zenoh_router': '#FF5722'}
+        markers = {'cyclonedds': 'o', 'zenoh': 's',
+                'zenoh_peer': 's', 'zenoh_router': '^'}
         for profile in profiles:
             exps = sorted(by_mw_profile[(mw, profile)], key=lambda x: x['num_nodes'])
             if not exps:

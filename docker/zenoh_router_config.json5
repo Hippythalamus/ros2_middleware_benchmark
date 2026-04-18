@@ -6,8 +6,12 @@
     ],
   },
   scouting: {
-    multicast: {
-      enabled: false,
+    multicast: { enabled: false },
+  },
+  transport: {
+    unicast: {
+      qos: { enabled: true },
+      max_sessions: 10000,
     },
   },
 }

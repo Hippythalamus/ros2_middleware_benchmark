@@ -1,0 +1,29 @@
+{
+  mode: "client",
+  connect: {
+    endpoints: [
+      "tcp/bench_zenoh_router:7447"
+    ],
+  },
+  listen: {
+    endpoints: [],
+  },
+  scouting: {
+    multicast: { enabled: false },
+    gossip: { enabled: false },
+  },
+  transport: {
+    unicast: {
+      qos: { enabled: true },
+      lowlatency: false,
+      max_sessions: 1,
+      max_links: 1,
+    },
+    link: {
+      tx: {
+        batch_size: 65535,
+      },
+    },
+    shared_memory: { enabled: false },
+  },
+}

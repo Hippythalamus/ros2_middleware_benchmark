@@ -136,7 +136,12 @@ def run_experiment(args):
     use_zenoh = is_zenoh(rmw)
 
     # Result directory
-    rmw_short = "cyclonedds" if "cyclone" in rmw else "zenoh"
+    if "cyclone" in rmw:
+        rmw_short = "cyclonedds"
+    elif use_zenoh and args.zenoh_mode == "client":
+        rmw_short = "zenoh_router"
+    else:
+        rmw_short = "zenoh_peer"
     experiment_name = f"{topology}_{profile}_{num_subs}nodes"
     result_dir = Path("results") / rmw_short / experiment_name
     result_dir.mkdir(parents=True, exist_ok=True)
@@ -158,6 +163,18 @@ def run_experiment(args):
 
     ensure_network()
     cleanup_containers()
+
+    # --- Zenoh mode selection ---
+    zenoh_config = None
+    if use_zenoh:
+        if args.zenoh_mode == "client":
+            zenoh_config = "docker/zenoh_client_config.json5"
+            if not start_zenoh_router():
+                print("[orch] FAILED to start Zenoh router, aborting")
+                return False
+        else:
+            zenoh_config = "docker/zenoh_peer_config.json5"
+
 
     container_names = []
     wait_threads = []
@@ -186,7 +203,7 @@ def run_experiment(args):
             if use_zenoh:
                 cmd += [
                 "-e", "ZENOH_SESSION_CONFIG_URI=/zenoh_config.json5",
-                "-v", f"{os.path.abspath('docker/zenoh_peer_config.json5')}:/zenoh_config.json5",
+                "-v", f"{os.path.abspath(zenoh_config)}:/zenoh_config.json5",
                 ]
             cmd += [
                     "-v", f"{os.path.abspath(result_dir)}:/ws/results",
@@ -235,7 +252,7 @@ def run_experiment(args):
         if use_zenoh:
             pub_cmd += [
             "-e", "ZENOH_SESSION_CONFIG_URI=/zenoh_config.json5",
-            "-v", f"{os.path.abspath('docker/zenoh_peer_config.json5')}:/zenoh_config.json5",
+            "-v", f"{os.path.abspath(zenoh_config)}:/zenoh_config.json5",
             ]
         pub_cmd += [
 
@@ -349,6 +366,9 @@ def main():
     parser.add_argument("--profile", default="imu",
                         choices=["twist", "imu", "laserscan", "pointcloud"],
                         help="Message profile")
+    parser.add_argument("--zenoh-mode", default="peer",
+                    choices=["peer", "client"],
+                    help="Zenoh session mode: peer (direct) or client (via router)")
     parser.add_argument("--subscribers", type=int, default=5,
                         help="Number of subscriber nodes")
     parser.add_argument("--messages", type=int, default=5000,
